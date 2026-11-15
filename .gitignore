@@ -1,0 +1,8 @@
+build/
+build-test/
+build-cmake/
+*.obj
+*.pdb
+*.ilk
+# reference schematics and manuals stay out of the repository
+*.pdf

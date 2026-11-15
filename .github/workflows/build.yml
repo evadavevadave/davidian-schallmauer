@@ -1,0 +1,150 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Builds, tests and packages the Schallmauer bundle for Windows, macOS and Linux.
+# Every push and pull request gets downloadable builds; a v* tag also publishes a release.
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x64
+            os: windows-latest
+            configure: -A x64
+          - name: macos-universal
+            os: macos-latest
+            # One bundle for Apple silicon and Intel Macs, macOS 10.13 and later.
+            configure: -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" -DCMAKE_OSX_DEPLOYMENT_TARGET=10.13
+          - name: linux-x64
+            # The oldest supported runner. The libraries need only glibc 2.29 (Ubuntu 20.04, Debian 11).
+            os: ubuntu-22.04
+          - name: linux-arm64
+            os: ubuntu-22.04-arm
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Linux packages
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libx11-dev lilv-utils lv2-dev
+
+      - name: Configure
+        shell: bash
+        run: cmake -S . -B build-cmake -DCMAKE_BUILD_TYPE=Release ${{ matrix.configure }}
+
+      - name: Build
+        run: cmake --build build-cmake --config Release
+
+      - name: Test
+        run: ctest --test-dir build-cmake -C Release --output-on-failure
+
+      - name: Check the bundle
+        shell: bash
+        run: |
+          set -e
+          B=build-cmake/schallmauer.lv2
+          case "$RUNNER_OS" in
+            Windows) EXT=dll; UI=WindowsUI ;;
+            macOS)   EXT=dylib; UI=CocoaUI ;;
+            Linux)   EXT=so; UI=X11UI ;;
+          esac
+          for f in schallmauer.$EXT schallmauer_ui.$EXT manifest.ttl schallmauer.ttl LICENSE NOTICE.md AI_USAGE.md; do
+            test -f "$B/$f" || { echo "missing $f"; exit 1; }
+          done
+          grep -q "ui:$UI" "$B/manifest.ttl"
+          ls -l "$B"
+          if [ "$RUNNER_OS" = Windows ]; then
+            V="build-cmake/VST3/Release/Davidian Schallmauer.vst3"
+            for f in "x86_64-win/Davidian Schallmauer.vst3" Resources/moduleinfo.json Resources/LICENSE Resources/NOTICE.md Resources/AI_USAGE.md Resources/VST3-SDK-MIT.txt; do
+              test -f "$V/Contents/$f" || { echo "missing VST3 $f"; exit 1; }
+            done
+            ls -lR "$V"
+          fi
+          if [ "$RUNNER_OS" = macOS ]; then
+            lipo -info "$B/schallmauer.dylib" "$B/schallmauer_ui.dylib"
+            otool -l "$B/schallmauer.dylib" | grep -A3 -E "LC_BUILD_VERSION|LC_VERSION_MIN" | head -8
+            C="build-cmake/AU/Davidian Schallmauer.component"
+            for f in Info.plist "MacOS/Davidian Schallmauer" Resources/LICENSE Resources/NOTICE.md Resources/AI_USAGE.md Resources/Apache-2.0.txt; do
+              test -f "$C/Contents/$f" || { echo "missing AU $f"; exit 1; }
+            done
+            lipo -info "$C/Contents/MacOS/Davidian Schallmauer"
+            codesign --verify --verbose "$C"
+            plutil -p "$C/Contents/Info.plist"
+          fi
+          if [ "$RUNNER_OS" = Linux ]; then
+            # The lilv LV2 parser, as hosts use it, on a folder holding only this bundle.
+            mkdir -p "$RUNNER_TEMP/lv2" && cp -r "$B" "$RUNNER_TEMP/lv2/"
+            LV2_PATH="$RUNNER_TEMP/lv2:/usr/lib/lv2:/usr/lib/$(uname -m)-linux-gnu/lv2" lv2info urn:davidian:schallmauer | head -30
+            objdump -T "$B/schallmauer.so" "$B/schallmauer_ui.so" | grep -E "GLIBC_2\.[0-9]+" -o | sort -uV | tail -1
+          fi
+
+      - name: Validate the Audio Unit with auval
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -e
+          mkdir -p ~/Library/Audio/Plug-Ins/Components
+          cp -R "build-cmake/AU/Davidian Schallmauer.component" ~/Library/Audio/Plug-Ins/Components/
+          killall -9 AudioComponentRegistrar 2>/dev/null || true
+          for i in $(seq 1 15); do auval -a 2>/dev/null | grep -q "Shmr Dvdn" && break; sleep 2; done
+          auval -a | grep "Dvdn"
+          auval -strict -v aufx Shmr Dvdn
+          # The Intel half of the universal binary, through Rosetta.
+          softwareupdate --install-rosetta --agree-to-license >/dev/null 2>&1 || true
+          arch -x86_64 auval -strict -v aufx Shmr Dvdn | tail -25
+
+      - name: Package
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          case "$GITHUB_REF" in refs/tags/*) ;; *) VERSION="dev-${GITHUB_SHA::7}" ;; esac
+          ZIP="Davidian-Schallmauer-${VERSION#v}-${{ matrix.name }}.zip"
+          # Every format built for this platform, side by side at the top of the zip.
+          mkdir stage && cp -R build-cmake/schallmauer.lv2 stage/
+          case "$RUNNER_OS" in
+            Windows) cp -R "build-cmake/VST3/Release/Davidian Schallmauer.vst3" stage/ ;;
+            macOS) cp -R "build-cmake/AU/Davidian Schallmauer.component" stage/ ;;
+          esac
+          (cd stage && cmake -E tar cf "../$ZIP" --format=zip -- *)
+          echo "ZIP=$ZIP" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ env.ZIP }}
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd dist
+          sha256sum *.zip > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          { cat ../.github/release-notes.md; echo; echo '## SHA-256'; echo; echo '```'; cat SHA256SUMS.txt; echo '```'; } > notes.md
+          gh release create "$GITHUB_REF_NAME" *.zip SHA256SUMS.txt \
+            --title "Davidian Schallmauer ${GITHUB_REF_NAME#v}" --notes-file notes.md
