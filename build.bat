@@ -40,6 +40,10 @@ for %%F in (LICENSE NOTICE.md AI_USAGE.md) do copy /y "%ROOT%%%F" "%BUNDLE%\" >n
 cl /nologo /std:c11 /O2 /fp:precise /MT /W3 "%ROOT%test\test_dsp.c" /Fo"%TESTS%\\" /Fe"%TESTS%\test_dsp.exe" /link /NOLOGO
 if errorlevel 1 (popd & exit /b 1)
 
+rem The sound regression check and benchmark (see test\golden.c); not run here.
+cl /nologo /std:c11 /O2 /fp:precise /MT /W3 "%ROOT%test\golden.c" /Fo"%TESTS%\\" /Fe"%TESTS%\golden.exe" /link /NOLOGO
+if errorlevel 1 (popd & exit /b 1)
+
 cl /nologo /std:c11 /O2 /MT /W3 "%ROOT%test\ui_render.c" /Fo"%TESTS%\\" /Fe"%TESTS%\ui_render.exe" /link /NOLOGO
 if errorlevel 1 (popd & exit /b 1)
 

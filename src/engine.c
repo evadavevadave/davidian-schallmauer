@@ -49,6 +49,14 @@ static inline void fp_restore(fpstate s) { __asm__ __volatile__("msr fpcr, %0" :
 /* Speaker volts to sample value: 30 V is 0 dBFS, so full power (62 V peaks into 16 ohms)
  * peaks at about +6 dBFS and the default settings sit around -18 dBFS RMS. */
 #define OUT_SCALE (1.0 / 30.0)
+/* Sleep: once the speaker has stayed below SLEEP_OUT for SLEEP_WINDOWS windows of SLEEP_SECONDS
+ * with the controls still, the circuit stops running and the output is silent. It wakes, from
+ * the state it stopped in, when the input rises 12 dB above the loudest it was in the last
+ * window, or a control moves. SLEEP_OUT is -100 dBFS at the output. */
+#define SLEEP_OUT (1e-5 / OUT_SCALE)
+#define SLEEP_SECONDS 0.25
+#define SLEEP_WINDOWS 2
+#define WAKE_FLOOR 1e-7 /* volts: the input always wakes it above this */
 
 /* Knob order in the smoothing array: every control from PORT_CHANNEL to PORT_MASTER. */
 #define NKNOB (PORT_MASTER - PORT_CHANNEL + 1)
@@ -66,6 +74,9 @@ typedef struct ShEngine {
     double volts, gain, cab_mix;
     double fade, fade_step;
     int sub;
+    /* Sleep: see sh_engine_run. */
+    int asleep, quiet, win, win_len, moving;
+    double in_peak, out_peak, wake_in;
 } Plugin;
 
 static double ctl(const Plugin* p, int port, double lo, double hi, double fallback)
@@ -110,16 +121,40 @@ static void knob_targets(const Plugin* p, double* t)
     }
 }
 
+/* The oversampling factor. Standard runs the circuit at 88.2 kHz or more (2x at 44.1 and
+ * 48 kHz), High at 176.4 kHz or more (4x at 44.1 and 48 kHz, 2x at 88.2 and 96 kHz). */
+static int os_factor(double fs, int high)
+{
+    if (high)
+        return fs <= 50000.0 ? 4 : (fs <= 100000.0 ? 2 : 1);
+    return fs <= 50000.0 ? 2 : 1;
+}
+
+static int want_high(const Plugin* p) { return ctl(p, PORT_QUALITY, 0, 1, 0) > 0.5; }
+
+/* Moves the circuit to the rate the Quality control asks for and clears the filters.
+ * The caller then resets the circuit. */
+static void set_quality(Plugin* p)
+{
+    const int os = os_factor(p->fs, want_high(p));
+    if (os != p->os) {
+        p->os = os;
+        amp_set_rate(&p->amp, p->fs * os);
+    }
+    hb_reset(&p->up1);
+    hb_reset(&p->up2);
+    hb_reset(&p->dn1);
+    hb_reset(&p->dn2);
+}
+
 ShEngine* sh_engine_new(double sample_rate)
 {
     Plugin* p = (Plugin*)calloc(1, sizeof(Plugin));
-    double fs_os;
     if (!p)
         return NULL;
     p->fs = sample_rate;
-    p->os = sample_rate <= 50000.0 ? 4 : (sample_rate <= 100000.0 ? 2 : 1);
-    fs_os = sample_rate * p->os;
-    if (!amp_init(&p->amp, fs_os)) {
+    p->os = os_factor(sample_rate, 0);
+    if (!amp_init(&p->amp, sample_rate * p->os)) {
         free(p);
         return NULL;
     }
@@ -132,6 +167,7 @@ ShEngine* sh_engine_new(double sample_rate)
     p->ch_coef = 1.0 - exp(-SUB / (CHANNEL_SECONDS * sample_rate));
     p->cab_coef = 1.0 - exp(-1.0 / (CAB_SECONDS * sample_rate));
     p->fade_step = 1.0 / (BYPASS_SECONDS * sample_rate);
+    p->win_len = (int)(SLEEP_SECONDS * sample_rate);
     p->ok = 1;
     return p;
 }
@@ -148,33 +184,29 @@ void sh_engine_activate(ShEngine* h)
     Plugin* p = (Plugin*)h;
     AmpPots pots;
     knob_targets(p, p->knob);
+    set_quality(p);
     pots_from_knobs(p->knob, &pots);
     amp_reset(&p->amp, &pots);
-    hb_reset(&p->up1);
-    hb_reset(&p->up2);
-    hb_reset(&p->dn1);
-    hb_reset(&p->dn2);
     cab_reset(&p->cab);
     p->volts = ctl(p, PORT_VOLTS, 0.1, 10.0, 1.0);
     p->gain = pow(10.0, ctl(p, PORT_OUTPUT, -24.0, 12.0, 0.0) / 20.0);
     p->cab_mix = ctl(p, PORT_CAB, 0, 1, 1) > 0.5 ? 1.0 : 0.0;
     p->fade = ctl(p, PORT_ENABLED, 0, 1, 1) > 0.5 ? 1.0 : 0.0;
     p->sub = 0;
+    p->asleep = p->quiet = p->win = p->moving = 0;
+    p->in_peak = p->out_peak = 0.0;
 }
 
 static inline double run_amp(Plugin* p, double x)
 {
-    double a, b, c, d;
+    double a, b, v[4];
+    int k;
     switch (p->os) {
     case 4:
-        hb_up(&p->up1, x, &a, &c);
-        hb_up(&p->up2, a, &a, &b);
-        hb_up(&p->up2, c, &c, &d);
-        a = amp_tick(&p->amp, a);
-        b = amp_tick(&p->amp, b);
-        c = amp_tick(&p->amp, c);
-        d = amp_tick(&p->amp, d);
-        return hb_down(&p->dn1, hb_down(&p->dn2, a, b), hb_down(&p->dn2, c, d));
+        hb_up4(&p->up1, &p->up2, x, v);
+        for (k = 0; k < 4; ++k)
+            v[k] = amp_tick(&p->amp, v[k]);
+        return hb_down4(&p->dn1, &p->dn2, v);
     case 2:
         hb_up(&p->up1, x, &a, &b);
         a = amp_tick(&p->amp, a);
@@ -208,11 +240,21 @@ void sh_engine_run(ShEngine* h, uint32_t n)
     csr = fp_flush_denormals();
 #endif
     knob_targets(p, t);
+    if (os_factor(p->fs, want_high(p)) != p->os) {
+        /* A new rate: the circuit restarts from its operating point at that rate (a few
+         * milliseconds of work, once). */
+        AmpPots pots;
+        set_quality(p);
+        pots_from_knobs(p->knob, &pots);
+        amp_reset(&p->amp, &pots);
+        p->asleep = p->quiet = p->win = 0;
+        p->in_peak = p->out_peak = 0.0;
+    }
 
     for (i = 0; i < n; ++i) {
         /* Both inputs are read before either output is written, so processing in place is fine.
          * The amp is mono: the inputs are averaged, so a mono source on both gives its own level. */
-        double xa = in[i], xb = in_b[i], x, y, spk, cab;
+        double xa = in[i], xb = in_b[i], x, xv, y, spk, cab;
         if (!isfinite(xa))
             xa = 0.0;
         if (!isfinite(xb))
@@ -221,11 +263,19 @@ void sh_engine_run(ShEngine* h, uint32_t n)
         if (p->sub == 0) {
             AmpPots pots;
             int k;
-            for (k = 0; k < NKNOB; ++k)
-                p->knob[k] += (k == 0 ? p->ch_coef : p->sm_coef) * (t[k] - p->knob[k]);
-            pots_from_knobs(p->knob, &pots);
-            amp_set_pots(&p->amp, &pots);
-            amp_update(&p->amp);
+            p->moving = 0;
+            for (k = 0; k < NKNOB; ++k) {
+                const double d = t[k] - p->knob[k];
+                p->knob[k] += (k == 0 ? p->ch_coef : p->sm_coef) * d;
+                p->moving |= fabs(d) > 1e-6;
+            }
+            if (p->moving)
+                p->asleep = 0;
+            if (!p->asleep) {
+                pots_from_knobs(p->knob, &pots);
+                amp_set_pots(&p->amp, &pots);
+                amp_update(&p->amp);
+            }
         }
         p->sub = (p->sub + 1) % SUB;
         p->volts += 0.002 * (volts_to - p->volts);
@@ -237,12 +287,32 @@ void sh_engine_run(ShEngine* h, uint32_t n)
             p->fade = fade_to > p->fade - p->fade_step ? fade_to : p->fade - p->fade_step;
 
         /* The amp keeps running while the host bypasses it, so it comes back without a thump. */
-        spk = run_amp(p, x * p->volts);
-        if (!isfinite(spk)) {
-            AmpPots pots;
-            pots_from_knobs(p->knob, &pots);
-            amp_reset(&p->amp, &pots);
+        xv = x * p->volts;
+        if (p->asleep && fabs(xv) > p->wake_in)
+            p->asleep = 0;
+        if (p->asleep) {
             spk = 0.0;
+        } else {
+            spk = run_amp(p, xv);
+            if (!isfinite(spk)) {
+                AmpPots pots;
+                pots_from_knobs(p->knob, &pots);
+                amp_reset(&p->amp, &pots);
+                spk = 0.0;
+            }
+            /* Watch for silence, a window at a time. */
+            p->in_peak = fmax(p->in_peak, fabs(xv));
+            p->out_peak = fmax(p->out_peak, fabs(spk));
+            if (++p->win >= p->win_len) {
+                p->quiet = (p->out_peak < SLEEP_OUT && !p->moving) ? p->quiet + 1 : 0;
+                if (p->quiet >= SLEEP_WINDOWS) {
+                    p->asleep = 1;
+                    p->quiet = 0;
+                    p->wake_in = fmax(4.0 * p->in_peak, WAKE_FLOOR);
+                }
+                p->win = 0;
+                p->in_peak = p->out_peak = 0.0;
+            }
         }
         cab = cab_tick(&p->cab, spk);
         y = (p->cab_mix * cab + (1.0 - p->cab_mix) * spk) * OUT_SCALE * p->gain;

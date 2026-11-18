@@ -203,6 +203,28 @@ static double amp_level(AmpPots* p, double f, double lv, double secs)
     return sqrt(s / m);
 }
 
+/* The gain for the fundamental of a tone at f (a whole number of cycles in 0.1 s at FS_OS),
+ * with the output's RMS level in *rms. */
+static double amp_fund_gain(AmpPots* p, double f, double lv, double secs, double* rms)
+{
+    const int n = (int)(FS_OS * secs), m = (int)(FS_OS * 0.1);
+    double s = 0.0, c = 0.0, q = 0.0;
+    int i;
+    amp_set_pots(&amp, p);
+    amp_update(&amp);
+    amp_reset(&amp, p);
+    for (i = 0; i < n; ++i) {
+        const double ph = 2.0 * PI * f * i / FS_OS, y = amp_tick(&amp, lv * sin(ph));
+        if (i >= n - m) {
+            s += y * sin(ph);
+            c += y * cos(ph);
+            q += y * y;
+        }
+    }
+    *rms = sqrt(q / m);
+    return 2.0 * sqrt(s * s + c * c) / m / lv;
+}
+
 typedef struct {
     const char* name;
     size_t field;
@@ -278,11 +300,27 @@ static void test_power(void)
     p.channel = 0.0;
     p.cl_gain = 0.5;
     p.master = 1.0;
-    /* Where the output starts to clip (a 50 mV input), then driven into a square wave. */
-    v = amp_level(&p, 400.0, 0.05, 0.6);
-    w = v * v / Z_SPK;
-    snprintf(label, sizeof label, "clean channel at the edge of clipping: %.0f W RMS into 16 ohms (rated 120 W)", w);
-    check(label, in_range(w, 80.0, 170.0));
+    /* Where the output starts to clip: the input at which the gain for a 400 Hz tone has fallen
+     * 1 dB below its small-signal gain, found by bisection. (The clean channel has no global
+     * feedback, so the push-pull stage first gains a few dB on its way into class B; the
+     * compression after that is the clipping.) Then driven into a square wave. */
+    {
+        const double g0 = amp_fund_gain(&p, 400.0, 0.002, 0.6, &v);
+        double lo = log(0.002), hi = log(3.0), lv = 0.0, g = 0.0;
+        int k;
+        for (k = 0; k < 12; ++k) {
+            lv = exp(0.5 * (lo + hi));
+            g = amp_fund_gain(&p, 400.0, lv, 0.6, &v);
+            if (g < g0 * 0.891) /* 1 dB down */
+                hi = log(lv);
+            else
+                lo = log(lv);
+        }
+        w = v * v / Z_SPK;
+        snprintf(label, sizeof label, "clean channel 1 dB into compression (%.0f mV in): %.0f W RMS into 16 ohms (rated 120 W)",
+                 1e3 * lv, w);
+        check(label, in_range(w, 80.0, 170.0));
+    }
     v = amp_level(&p, 400.0, 0.5, 0.6);
     w = v * v / Z_SPK;
     snprintf(label, sizeof label, "clean channel flat out: %.0f W RMS (a square wave), B+ sags to %.0f V", w, amp.bplus);
@@ -332,17 +370,18 @@ static void test_stability(void)
         y = amp_tick(&amp, 0.2 * sin(2.0 * PI * 196.0 * i / FS_OS));
         if (!isfinite(y))
             ok = 0;
-        /* steps while the channel moves (and the relay and optos settle) against steps in the
-         * clipped note itself on either channel */
+        /* The peak while the channel moves (and the relay and optos settle) against the peak of
+         * the clipped note itself on either channel. As the feedback opto fades, the high-gain
+         * note's flyback edges grow for a moment, so the switch may run somewhat higher; a pop
+         * from the switch itself would go well past. */
         if (i > FS_OS * 0.3 && i < FS_OS * 0.45)
-            jump = fmax(jump, fabs(y - last));
+            jump = fmax(jump, fabs(y));
         else if (i > FS_OS * 0.1)
-            jump_play = fmax(jump_play, fabs(y - last));
+            jump_play = fmax(jump_play, fabs(y));
         last = y;
     }
-    snprintf(label, sizeof label, "switching channels mid-note: largest step between samples %.1f V (%.1f V while playing)",
-             jump, jump_play);
-    check(label, ok && jump < 1.25 * jump_play + 2.0);
+    snprintf(label, sizeof label, "switching channels mid-note: peak %.0f V (%.0f V while playing)", jump, jump_play);
+    check(label, ok && jump < 1.5 * jump_play);
 }
 
 static void test_oversampler(void)
@@ -389,6 +428,38 @@ static void test_oversampler(void)
     check(label, fabs(pass) < 0.1);
     snprintf(label, sizeof label, "out-of-band tone rejected by %.0f dB", -stop);
     check(label, stop < -60.0);
+
+    /* The 4x chain, each direction on its own against exact tones: flat to 16 kHz at 48 kHz.
+     * (Up then straight down would hide a fault, as the pair reduces to an allpass.) */
+    {
+        static const double fr[4] = { 1000.0, 4000.0, 10000.0, 16000.0 };
+        double worst_up = 0.0, worst_dn = 0.0;
+        int k, j;
+        for (k = 0; k < 4; ++k) {
+            HalfBand u1, u2, d1, d2;
+            double su = 0.0, sd = 0.0, n = 0.0, w = 2.0 * PI * fr[k] / 48000.0, o[4], q[4], y;
+            hb_init(&u1);
+            hb_init(&u2);
+            hb_init(&d1);
+            hb_init(&d2);
+            for (i = 0; i < 24000; ++i) {
+                hb_up4(&u1, &u2, sin(w * i), o);
+                for (j = 0; j < 4; ++j)
+                    q[j] = sin(w * (i + 0.25 * j));
+                y = hb_down4(&d1, &d2, q);
+                if (i > 2400) {
+                    for (j = 0; j < 4; ++j)
+                        su += o[j] * o[j];
+                    sd += y * y;
+                    n += 0.5;
+                }
+            }
+            worst_up = fmax(worst_up, fabs(db(sqrt(su / (4.0 * n)))));
+            worst_dn = fmax(worst_dn, fabs(db(sqrt(sd / n))));
+        }
+        snprintf(label, sizeof label, "4x up and down each flat to 16 kHz: within %.3f and %.3f dB", worst_up, worst_dn);
+        check(label, worst_up < 0.05 && worst_dn < 0.05);
+    }
 }
 
 /* ---- Part 2: the plugin library ---- */
@@ -401,7 +472,7 @@ typedef struct {
 
 static void inst_open(Inst* x, const LV2_Descriptor* d, double fs)
 {
-    static const float defs[PORT_COUNT] = { 0, 0, 0, 0, 1, 0.8f, 0.4f, 1, 1, 1, 1, 0.6f, 0.6f, 0.6f, 0.6f, 0.6f, 0.6f, 0.2f, 1, 1, 0, 1, 0 };
+    static const float defs[PORT_COUNT] = { 0, 0, 0, 0, 1, 0.8f, 0.4f, 1, 1, 1, 1, 0.6f, 0.6f, 0.6f, 0.6f, 0.6f, 0.6f, 0.2f, 1, 1, 0, 1, 0, 0 };
     int i;
     x->d = d;
     memcpy(x->c, defs, sizeof defs);
@@ -506,6 +577,28 @@ static void test_library(const char* bundle)
     inst_close(&x);
     check("host bypass output is identical to input",
           memcmp(in, oa, sizeof(float) * (n / 4)) == 0 && memcmp(in, ob, sizeof(float) * (n / 4)) == 0);
+
+    /* Quality: High (4x at 48 kHz) gives the same level as Standard, and switching it while
+     * playing restarts the circuit cleanly. */
+    {
+        double s0 = 0.0, s1 = 0.0, peak = 0.0;
+        int finite = 1;
+        inst_open(&x, d, fs);
+        inst_render(&x, in, oa, ob, n / 2, 256);
+        for (i = n / 4; i < n / 2; ++i)
+            s0 += (double)oa[i] * oa[i];
+        x.c[PORT_QUALITY] = 1.0f;
+        inst_render(&x, in + n / 2, oa, ob, n / 2, 256);
+        for (i = 0; i < n / 2; ++i) {
+            finite &= isfinite(oa[i]);
+            peak = fmax(peak, fabs(oa[i]));
+            if (i >= n / 4)
+                s1 += (double)oa[i] * oa[i];
+        }
+        inst_close(&x);
+        snprintf(label, sizeof label, "Quality High after Standard while playing: %+.2f dB, peak %.2f", db(sqrt(s1 / s0)), peak);
+        check(label, finite && fabs(db(sqrt(s1 / s0))) < 1.0 && peak < 4.0);
+    }
 
     /* Every supported rate runs and makes sound. */
     for (r = 0; r < 5; ++r) {

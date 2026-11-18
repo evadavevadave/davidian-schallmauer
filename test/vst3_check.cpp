@@ -113,10 +113,10 @@ static void test_editor(IEditController* ctrl, Handler& handler)
                                                                 && handler.log.size() >= 4);
         check("knob drag ends 0.2 higher", std::fabs(v - 0.8) < 1e-4);
 
-        /* Cabinet switch at (650, 400): the top position is Off. */
+        /* Cabinet switch at (640, 400): the top position is Off. */
         handler.log.clear();
-        SendMessageA(panel, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(650, 382));
-        SendMessageA(panel, WM_LBUTTONUP, 0, MAKELPARAM(650, 382));
+        SendMessageA(panel, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(640, 382));
+        SendMessageA(panel, WM_LBUTTONUP, 0, MAKELPARAM(640, 382));
         check("switch click selects Off", one_edit(handler.log, PORT_CAB, &v) && v == 0.0);
 
         handler.log.clear();
@@ -226,7 +226,7 @@ int main(int argc, char** argv)
                 bypass += (info.flags & ParameterInfo::kIsBypass) && info.id == PORT_ENABLED;
                 readonly += (info.flags & ParameterInfo::kIsReadOnly) != 0;
             }
-        check("19 parameters: 17 controls, bypass and the power lamp", ctrl->getParameterCount() == 19);
+        check("20 parameters: 18 controls, bypass and the power lamp", ctrl->getParameterCount() == 20);
         check("one bypass parameter", bypass == 1);
         check("the power lamp is read only", readonly == 1);
         String128 text;

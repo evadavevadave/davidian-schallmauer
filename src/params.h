@@ -43,13 +43,14 @@ static const ShParam SH_PARAMS[] = {
     { PORT_VOLTS, "Volts at 0 dBFS", "Volts", 0.1f, 10.0f, 1.0f, 1, 0, "V", { 0, 0, 0 }, 0 },
     { PORT_OUTPUT, "Output", "Output", -24.0f, 12.0f, 0.0f, 0, 0, "dB", { 0, 0, 0 }, 0 },
     { PORT_ENABLED, "Enabled", "Enabled", 0, 1, 1, 0, 1, "", { "Off", "On", 0 }, 0 },
+    { PORT_QUALITY, "Quality", "Quality", 0, 1, 0, 0, 1, "", { "Standard", "High", 0 }, 0 },
     { PORT_POWER, "Output Power", "Power", 0, 1, 0, 0, 0, "", { 0, 0, 0 }, 1 },
 };
 #define SH_NUM_PARAMS ((int)(sizeof SH_PARAMS / sizeof SH_PARAMS[0]))
 
 /* The first control port and the number of saved values: every input control, in port order. */
 #define SH_FIRST_CONTROL PORT_CHANNEL
-#define SH_NUM_INPUTS (PORT_ENABLED - PORT_CHANNEL + 1)
+#define SH_NUM_INPUTS (PORT_QUALITY - PORT_CHANNEL + 1)
 
 static const ShParam* sh_param(int port)
 {

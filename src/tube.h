@@ -206,28 +206,37 @@ static inline double pent_eval(const PentLut* L, double vg1, double vp, double v
     return base * G * A;
 }
 
-/* Grid voltage against a Thevenin source (voc behind rth), with the cathode at vk.
- * Returns the grid voltage; *ig gets the grid current (flowing into the grid). */
-static inline double grid_solve(const GridLut* s, double voc, double rth, double vk, double* ig)
+/* Grid voltage against a Thevenin source (voc behind rth), with the cathode at vk. Returns the
+ * grid voltage; *ig gets the grid current (flowing into the grid) and *slope its slope against
+ * the grid-cathode voltage. guess is a grid-cathode voltage to start from: the last sample's is
+ * usually within millivolts. The residual v - (voc - vk) + rth ig(v) rises and is convex in v,
+ * so from either side Newton lands at or right of the root and then closes in from there, and
+ * never beyond voc - vk (the slope is at least 1). */
+static inline double grid_solve(const GridLut* s, double voc, double rth, double vk, double guess, double* ig,
+                                double* slope)
 {
-    double vg = voc, slope, i;
+    const double u = voc - vk;
+    double v, i;
     int k;
-    i = grid_i(s, vg - vk, &slope);
-    if (i < 1e-12) {
-        *ig = 0.0;
-        return vg;
+    if (s->s->cg * u <= s->u0) { /* below the table: no grid current at all */
+        *ig = *slope = 0.0;
+        return voc;
+    }
+    v = guess < u ? guess : u;
+    i = grid_i(s, v, slope);
+    if (v == u && i < 1e-12) {
+        *ig = *slope = 0.0;
+        return voc;
     }
     for (k = 0; k < 8; ++k) {
-        const double f = vg - voc + rth * i;
-        const double d = 1.0 + rth * slope;
-        const double step = f / d;
-        vg -= step;
-        i = grid_i(s, vg - vk, &slope);
+        const double step = (v - u + rth * i) / (1.0 + rth * *slope);
+        v -= step;
+        i = grid_i(s, v, slope);
         if (fabs(step) < 1e-7)
             break;
     }
     *ig = i;
-    return vg;
+    return v + vk;
 }
 
 /* A triode gain stage: plate into a network port, cathode to ground through rk1 in series with
@@ -251,16 +260,11 @@ static void stage_setup(Stage* st, const TubeLut* lut, double rk1, double rk2, d
 
 /* The grid against its Thevenin source (voc, rth) with the cathode at vk: the grid voltage,
  * the grid current, and how much of a cathode move the grid follows (s, from grid current). */
-static inline double grid_at(const GridLut* gl, double voc, double rth, double vk, double* ig, double* s)
+static inline double grid_at(const GridLut* gl, double voc, double rth, double vk, double guess, double* ig, double* s)
 {
     double slope;
-    const double vg = grid_solve(gl, voc, rth, vk, ig);
-    if (*ig > 0.0) {
-        grid_i(gl, vg - vk, &slope);
-        *s = rth * slope / (1.0 + rth * slope);
-    } else {
-        *s = 0.0;
-    }
+    const double vg = grid_solve(gl, voc, rth, vk, guess, ig, &slope);
+    *s = *ig > 0.0 ? rth * slope / (1.0 + rth * slope) : 0.0;
     return vg;
 }
 
@@ -306,15 +310,16 @@ static double stage_solve(Stage* st, const GridLut* gl, double voc, double rth, 
     const double gk2 = 1.0 / st->rk2 + gc;
     const double rkx = st->rk1 + 1.0 / gk2;
     double ip = st->ip, ig = st->ig, vk = 0.0, vc = 0.0, vg = voc, s = 0.0, lo = 0.0, hi = 1.0;
+    double vgk = st->vg - st->vk; /* grid-cathode voltage: the last sample's, then the last iteration's */
     int k;
     for (k = 0; k < 40; ++k) {
         double gm, gp, f, d, step, t, vk0;
         /* The cathode sits at vk0 + rkx * ig, so the grid sees the cathode resistance in series
          * with its own source: solve the grid-cathode voltage directly. */
         vk0 = ip * rkx + ieq / gk2;
-        vg = grid_at(gl, voc - vk0, rth + rkx, 0.0, &ig, &s);
+        vgk = grid_at(gl, voc - vk0, rth + rkx, 0.0, vgk, &ig, &s);
         vk = vk0 + rkx * ig;
-        vg += vk;
+        vg = vgk + vk;
         t = lut_eval(st->lut, vg - vk, vh - z * ip - vk, &gm, &gp);
         f = ip - t;
         d = 1.0 + gm * rkx * (1.0 - s) + gp * (z + rkx);
@@ -346,14 +351,14 @@ typedef struct {
 
 static double follower_solve(Follower* f, const GridLut* gl, double voc, double rth, double vh, double z)
 {
-    double ip = f->ip, ig = f->ig, vk = vh, vg = voc, s = 0.0, lo = 0.0, hi = 1.0;
+    double ip = f->ip, ig = f->ig, vk = vh, vg = voc, s = 0.0, lo = 0.0, hi = 1.0, vgk = f->vg - f->vk;
     int k;
     for (k = 0; k < 40; ++k) {
         double gm, gp, t, r, d, step, vk0;
         vk0 = vh + z * ip;
-        vg = grid_at(gl, voc - vk0, rth + z, 0.0, &ig, &s);
+        vgk = grid_at(gl, voc - vk0, rth + z, 0.0, vgk, &ig, &s);
         vk = vk0 + z * ig;
-        vg += vk;
+        vg = vgk + vk;
         t = lut_eval(f->lut, vg - vk, f->vs - f->rp * ip - vk, &gm, &gp);
         r = ip - t;
         d = 1.0 + gm * z * (1.0 - s) + gp * (z + f->rp);

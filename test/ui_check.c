@@ -163,7 +163,7 @@ int main(int argc, char** argv)
     /* The host sends every port's value first. */
     {
         static const float vals[PORT_COUNT] = {
-            0, 0, 0, 0, 1, 0.8f, 0.4f, 1, 1, 1, 1, 0.6f, 0.6f, 0.6f, 0.6f, 0.6f, 0.6f, 0.2f, 1, 1, 0, 1, 0.3f
+            0, 0, 0, 0, 1, 0.8f, 0.4f, 1, 1, 1, 1, 0.6f, 0.6f, 0.6f, 0.6f, 0.6f, 0.6f, 0.2f, 1, 1, 0, 1, 0, 0.3f
         };
         for (i = 4; i < PORT_COUNT; ++i)
             d->port_event(ui, (uint32_t)i, sizeof(float), 0, &vals[i]);
@@ -185,10 +185,14 @@ int main(int argc, char** argv)
     snprintf(label, sizeof label, "double-click resets Clean Bass to %.2f", last_value);
     check(label, last_port == PORT_CL_BASS && fabsf(last_value - 0.4f) < 1e-4f);
 
-    click(child, 650, 400 - 18);
+    click(child, 640, 400 - 18);
     check("clicking the top of the cabinet switch selects Off", last_port == PORT_CAB && last_value == 0.0f);
-    click(child, 650, 400 + 18);
+    click(child, 640, 400 + 18);
     check("clicking the bottom of the cabinet switch selects 4x12", last_port == PORT_CAB && last_value == 1.0f);
+    click(child, 718, 400 + 18);
+    check("clicking the bottom of the quality switch selects High", last_port == PORT_QUALITY && last_value == 1.0f);
+    click(child, 718, 400 - 18);
+    check("clicking the top of the quality switch selects Standard", last_port == PORT_QUALITY && last_value == 0.0f);
     click(child, 131, 396);
     check("the footswitch selects the clean channel", last_port == PORT_CHANNEL && last_value == 0.0f);
 

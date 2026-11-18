@@ -69,15 +69,18 @@ target_link_libraries(test_dsp PRIVATE ${CMAKE_DL_LIBS})
 add_executable(ui_render test/ui_render.c)
 set_target_properties(ui_render PROPERTIES C_STANDARD 11)
 
+add_executable(golden test/golden.c)
+set_target_properties(golden PROPERTIES C_STANDARD 11)
+
 add_executable(params_check test/params_check.c)
 set_target_properties(params_check PROPERTIES C_STANDARD 11)
 
 if(NOT MSVC)
-    foreach(T schallmauer test_dsp ui_render params_check)
+    foreach(T schallmauer test_dsp ui_render params_check golden)
         target_compile_options(${T} PRIVATE -Wall -Wextra)
     endforeach()
     target_link_libraries(schallmauer PRIVATE m)
-    foreach(T test_dsp ui_render params_check)
+    foreach(T test_dsp ui_render params_check golden)
         target_link_libraries(${T} PRIVATE m)
         # The tests use parts of the panel and parameter headers, so the rest goes unused there.
         target_compile_options(${T} PRIVATE -Wno-unused-function)

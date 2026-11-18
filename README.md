@@ -67,6 +67,7 @@ Defaults are the owner's manual's suggested starting settings, read as 0–10.
 | Power Amp | Master | P13 (220k), default 2 |
 | Power Amp | Power lamp | Glows with the power into the speaker; fully lit at 120 W |
 | Output | Cabinet | Off, or a 4x12 cabinet curve after the speaker (the default) |
+| Output | Quality | Standard (the default) or High: how far the circuit is oversampled (see [How it is modelled](#how-it-is-modelled)). Changing it restarts the circuit from its operating point. |
 | Output | Input V | Volts at the input jack for a 0 dBFS sample (0.1 to 10, default 1.0) |
 | Output | Output | Not on the amplifier: -24 to +12 dB, default 0 dB |
 | (host) | Enabled | Plugin bypass with a 20 ms crossfade. In VST3 it is the host's bypass switch, and in an Audio Unit the host's bypass turns it off. The amplifier keeps running while bypassed, so it comes back without a thump. |
@@ -75,7 +76,7 @@ Gain, Volume, Master, Bass and Treble have an audio taper (10% at half rotation)
 
 With Cabinet off, the output is the voltage across the speaker: 30 V is 0 dBFS, so full power (about 62 V peaks into 16 Ω) peaks near +6 dBFS. Use Output to bring it down.
 
-Drag a knob up or down, hold Shift to fine-tune, use the mouse wheel, and double-click to reset. Click the footswitch to change channel, and the upper or lower part of the cabinet switch to pick that position. The readout shows the name and value of the last control you touched. In VST3 and Audio Unit hosts every move on the panel is a proper edit, so automation records it.
+Drag a knob up or down, hold Shift to fine-tune, use the mouse wheel, and double-click to reset. Click the footswitch to change channel, and the upper or lower part of the Cabinet or Quality switch to pick that position. The readout shows the name and value of the last control you touched. In VST3 and Audio Unit hosts every move on the panel is a proper edit, so automation records it.
 
 ## How it is modelled
 
@@ -88,10 +89,19 @@ All with the schematic's part values, in `src/amp.c`, `src/tube.h` and `src/net.
 - **Power section:** a long-tailed-pair phase inverter, four EL34s in push-pull at their fixed bias, and the output transformer (primary inductance, leakage, winding capacitance and core loss). The inverter, the output valves and the global feedback loop are solved together within each sample, so the feedback has no one-sample delay.
 - **Supplies:** the reservoir sags with the output valves' current through the rectifier and transformer resistance, and the screens draw from it through the choke.
 - **Speaker load:** a 16 Ω 4x12 as voice-coil resistance and inductance with the box resonance (about 56 Ω at 105 Hz), so the power stage sees a real speaker rather than a resistor.
-- **Oversampling:** the circuit runs at 4× the host rate up to 50 kHz, 2× up to 100 kHz, and 1× above that, with polyphase half-band filters (100 dB stopband).
+- **Oversampling:** with Quality on Standard the circuit runs at 2× the host rate up to 50 kHz and 1× above that; on High, at 4× up to 50 kHz, 2× up to 100 kHz and 1× above that. The filters are polyphase half-band filters (100 dB stopband). At 44.1 and 48 kHz the two settings measure within about 1 dB of each other in every third-octave band, on the test riffs at every setting tried.
+- **Sleep:** once the speaker has stayed below -100 dBFS for half a second with the controls still, the circuit stops running until the input rises or a control moves, and then carries on from where it stopped. With a guitar plugged in, an interface's noise floor is enough to keep it awake at high gain, as it would be audible hiss.
 - **Cabinet:** seven biquads shaping a closed-back 4x12 with 12" drivers: low-end roll-off and thump, a midrange dip, a presence peak near 2.6 kHz, and a steep top-end roll-off.
 
-It uses about half of one CPU core on a current x64 desktop at any sample rate.
+CPU use at 48 kHz on a current x64 desktop, as a share of one core (from `golden bench`, see [Tests](#tests)):
+
+| | Standard | High |
+|---|---|---|
+| Silence (after half a second) | about 0% | about 0% |
+| -90 dBFS noise floor, high-gain defaults | 22% | 39% |
+| Playing, high-gain defaults | 20% | 36% |
+| Playing, clean defaults | 13% | 23% |
+| Playing, high gain with every control up | 61% | 65% |
 
 ### Checked against the schematic and published specs
 
@@ -99,8 +109,8 @@ It uses about half of one CPU core on a current x64 desktop at any sample rate.
 |---|---|---|
 | Output valves | 4 × EL34, push-pull | Schematic |
 | Idle current per EL34 | 25 mA, bias -47 V | Owner's manual: 25 mA |
-| Power at the onset of clipping | 114 W into 16 Ω | Owner's manual: 120 W |
-| Flat out (square wave) | 206 W, the supply sagging from 475 V to 440 V | |
+| Power at the onset of clipping (gain 1 dB down) | 136 W into 16 Ω | Owner's manual: 120 W |
+| Flat out (square wave) | 202 W, the supply sagging from 475 V to 441 V | |
 | Preamp plates at idle | 173–258 V | Typical for 12AX7 stages on these supply rails |
 | Phase inverter at idle | 2.0 and 1.8 mA, cathodes at 58 V | Long-tailed-pair design references |
 
@@ -202,6 +212,7 @@ ctest --test-dir build-cmake -C Release
 ```
 
 - `test_dsp` checks the network solver against exact RC and LC responses, the valve tables against Koren's equations, the oversampling filters, the operating points of every valve, the direction and size of every tone control, the output power, stability with every control up and a 2 V input, channel switching while playing, and the built LV2 library at every common sample rate.
+- `golden` is a sound regression check and benchmark, not run by `ctest` because it needs a reference. `golden render ref.bin` renders a set of riffs, sweeps, channel switches and control moves at 48 kHz (add `high` for the High quality setting); render again after a change and `golden compare ref.bin new.bin` reports, per scenario, the waveform error, its worst 20 ms, the level change and the largest change in any third-octave band. `golden bench` times each scenario.
 - `ui_render` draws the panel to a BMP file without opening a window, on any platform: `build-test\ui_render.exe out.bmp`.
 - `ui_check` (Windows) hosts the built GUI and drives it with mouse messages.
 - `lilv_check` (Windows) validates the bundle with the lilv LV2 parser, without installing anything.

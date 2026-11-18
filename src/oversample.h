@@ -114,4 +114,23 @@ static inline double hb_down(HalfBand* h, double in0, double in1)
     return 0.5 * (s0 + s1);
 }
 
+/* 4x: two stages. The second stage of each direction runs at 2x, so it takes its two samples
+ * one after the other, in time order. */
+static inline void hb_up4(HalfBand* h1, HalfBand* h2, double in, double* o)
+{
+    double a, c;
+    hb_up(h1, in, &a, &c);
+    hb_up(h2, a, &o[0], &o[1]);
+    hb_up(h2, c, &o[2], &o[3]);
+}
+
+static inline double hb_down4(HalfBand* h1, HalfBand* h2, const double* in)
+{
+    /* Separate statements: C leaves the order of a call's arguments to the compiler, and h2
+     * must see in[0..1] before in[2..3]. */
+    const double a = hb_down(h2, in[0], in[1]);
+    const double b = hb_down(h2, in[2], in[3]);
+    return hb_down(h1, a, b);
+}
+
 #endif

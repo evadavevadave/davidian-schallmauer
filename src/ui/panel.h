@@ -54,7 +54,8 @@ static const Widget WIDGETS[] = {
     { W_KNOB, PORT_HG_VOLUME, 529 + 5 * KS, KY, KR, 0, 1, 0.6f, 0, "VOLUME", "HIGH GAIN VOLUME", 0, 0, {0}, 0 },
     { W_FOOT, PORT_CHANNEL, 131, 396, 22, 0, 1, 1, 0, "CHANNEL", "CHANNEL", 0, 0, { "CLEAN", "HIGH GAIN" }, 2 },
     { W_KNOB, PORT_MASTER, 360, 388, 30, 0, 1, 0.2f, 0, "MASTER", "MASTER VOLUME", "0", "10", {0}, 0 },
-    { W_SWITCH, PORT_CAB, 650, 400, 0, 0, 1, 1, 0, "CABINET", "CABINET SIM", 0, 0, { "OFF", "4X12" }, 2 },
+    { W_SWITCH, PORT_CAB, 640, 400, 0, 0, 1, 1, 0, "CABINET", "CABINET SIM", 0, 0, { "OFF", "4X12" }, 2 },
+    { W_SWITCH, PORT_QUALITY, 718, 400, 0, 0, 1, 0, 0, "QUALITY", "OVERSAMPLING", 0, 0, { "STD", "HIGH" }, 2 },
     { W_TRIM, PORT_VOLTS, 806, 402, 17, 0.1f, 10.0f, 1.0f, 1, "INPUT V", "VOLTS AT 0 DBFS", 0, 0, {0}, 0 },
     { W_TRIM, PORT_OUTPUT, 896, 402, 17, -24.0f, 12.0f, 0.0f, 0, "OUTPUT", "OUTPUT LEVEL", 0, 0, {0}, 0 },
 };

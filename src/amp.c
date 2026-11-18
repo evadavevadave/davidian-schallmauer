@@ -161,6 +161,8 @@ static const double amp_settle_s = AMP_SETTLE_S;
 #define R_CHOKE 100.0     /* choke L6 resistance to the screen supply */
 #define C_SCR 50e-6       /* screen supply cap, C7/C8 in series */
 #define R_G2 1e3          /* each EL34's screen resistor */
+#define SCREEN_TAU (1.0 / (192000.0 * 0.69314718055994531)) /* about 7.5 us: see amp_set_rate */
+#define POWER_TAU 0.0104 /* smoothing of the output power reading, seconds */
 #define R_WIND 1.0        /* OT winding resistance, seen from the secondary */
 #define C_WIND 50e-9      /* OT winding capacitance, seen from the secondary (0.5 nF at the primary) */
 #define RES_R 40.0        /* rectifier and transformer winding resistance */
@@ -333,7 +335,8 @@ static void build_nets(Amp* a)
     a->p12b = net_r(n, N5C_OUT, NET_GND, P12);
 
     /* The channel relay RE101B, R102, C101 and R103 -> V5a grid. Each channel's volume
-     * wiper drives the relay contact as a Thevenin source. */
+     * wiper drives the relay contact as a Thevenin source, and the current drawn goes back into
+     * that channel's tone stack (see tick). */
     n = &a->n5r;
     net_init(n, N5R_N, T);
     a->src_hout = net_src(n, N5R_REL, 1e9, 0.0);
@@ -465,11 +468,10 @@ static void build_all(Amp* a, int dc, int force)
     z = INV(&a->n1, N1_O, N1_O) - INV(&a->n1, N1_O, N1_P) * INV(&a->n1, N1_P, N1_O) / (INV(&a->n1, N1_P, N1_P) + a->rp1a);
     net_set_r(&a->n1h, a->src_hin, z + a->r_ldr_h);
     net_set_r(&a->n1c, a->src_cin, z + a->r_ldr_c);
-    z = INV(&a->n5h, N5H_OUT, N5H_OUT);
-    net_set_r(&a->n5r, a->src_hout, z + a->r_rel_h);
-    z = INV(&a->n5c, N5C_OUT, N5C_OUT)
-        - INV(&a->n5c, N5C_OUT, N5C_P) * INV(&a->n5c, N5C_P, N5C_OUT) / (INV(&a->n5c, N5C_P, N5C_P) + a->rp4b);
-    net_set_r(&a->n5r, a->src_cout, z + a->r_rel_c);
+    /* At each tone stack's output: the stack's own impedance this sample. The current n5r draws
+     * through it is injected back into the stack (see tick), so the two networks agree. */
+    net_set_r(&a->n5r, a->src_hout, INV(&a->n5h, N5H_OUT, N5H_OUT) + a->r_rel_h);
+    net_set_r(&a->n5r, a->src_cout, INV(&a->n5c, N5C_OUT, N5C_OUT) + a->r_rel_c);
     for (i = 0; i < NNETS; ++i) {
         Net* n = net_at(a, i);
         if (n->dirty)
@@ -506,6 +508,7 @@ typedef struct {
     const Amp* a;
     /* results of the last evaluation */
     double it, is, vf, vk, ig_a, ig_b, i_a, i_b, ig2a, ig2b, vga, ig_pi;
+    double gA, gB; /* the EL34 grids, also each grid solve's starting point */
 } PowerCtx;
 
 /* Residuals r and Jacobian J for x = { phase inverter currents ia, ib; half-primary voltage v }.
@@ -522,20 +525,20 @@ static void power_eval(PowerCtx* c, const double* x, double* r, double (*J)[3])
     const double zSF = INV(n9, N9_S0, N9_F), zSS = INV(n9, N9_S0, N9_S0);
     const double zaa = INV(n8, N8_PA, N8_PA), zab = INV(n8, N8_PA, N8_PB);
     const double zba = INV(n8, N8_PB, N8_PA), zbb = INV(n8, N8_PB, N8_PB);
-    double gA, gB, igs, sa, sb, slope, gmA, gpA, gmB, gpB, IA, IB, is, vf, vk, vgb;
+    double gA, gB, igs, sa, sb, slope, gmA, gpA, gmB, gpB, IA, IB, is, vf, vk, vgb, gk_pi;
     double dgA[2], dgB[2], dIs[3], dVF[3], dvk[3], dvgb[3], gma, gpa, gmb, gpb, ta, tb, vga, sga;
     int k;
 
     /* EL34 grids, two valves per side behind half the stopper. */
     gA = grid_solve(&c->a->gpen, c->goa - INV(n8, N8_GA, N8_PA) * ia - INV(n8, N8_GA, N8_PB) * ib,
-                    2.0 * INV(n8, N8_GA, N8_GA), 0.0, &igs);
+                    2.0 * INV(n8, N8_GA, N8_GA), 0.0, c->gA, &igs, &slope);
     c->ig_a = 2.0 * igs;
-    grid_i(&c->a->gpen, gA, &slope);
+    c->gA = gA;
     sa = 1.0 / (1.0 + 2.0 * INV(n8, N8_GA, N8_GA) * slope);
     gB = grid_solve(&c->a->gpen, c->gob - INV(n8, N8_GB, N8_PA) * ia - INV(n8, N8_GB, N8_PB) * ib,
-                    2.0 * INV(n8, N8_GB, N8_GB), 0.0, &igs);
+                    2.0 * INV(n8, N8_GB, N8_GB), 0.0, c->gB, &igs, &slope);
     c->ig_b = 2.0 * igs;
-    grid_i(&c->a->gpen, gB, &slope);
+    c->gB = gB;
     sb = 1.0 / (1.0 + 2.0 * INV(n8, N8_GB, N8_GB) * slope);
     dgA[0] = -INV(n8, N8_GA, N8_PA) * sa;
     dgA[1] = -INV(n8, N8_GA, N8_PB) * sa;
@@ -563,7 +566,8 @@ static void power_eval(PowerCtx* c, const double* x, double* r, double (*J)[3])
         dvgb[k] = dVF[k] + (c->dc ? R123 * dit : 0.0);
     }
 
-    vga = grid_at(&c->a->gtri, c->ga_voc, c->ga_rth, vk, &c->ig_pi, &sga);
+    gk_pi = c->vga - c->vk; /* the last evaluation's grid-cathode voltage */
+    vga = grid_at(&c->a->gtri, c->ga_voc, c->ga_rth, vk, gk_pi, &c->ig_pi, &sga);
     c->vga = vga;
     ta = lut_eval(&c->a->tri, vga - vk, c->vah - zaa * ia - zab * ib - vk, &gma, &gpa);
     tb = lut_eval(&c->a->tri, vgb - vk, c->vbh - zba * ia - zbb * ib - vk, &gmb, &gpb);
@@ -677,7 +681,6 @@ static double tick(Amp* a, double vin, int dc)
         net_inject(n4, N4_P, -ip3a - a->v3b.ig);
         net_commit(n4, dc);
         net_inject(n5h, N5H_A, a->v3b.ip + a->v3b.ig);
-        net_commit(n5h, dc);
         a->n5r.e[a->src_hout].src = n5h->x[N5H_OUT];
     }
 
@@ -692,7 +695,6 @@ static double tick(Amp* a, double vin, int dc)
         net_inject(n1c, NC_G4B, -a->v4b.ig);
         net_commit(n1c, dc);
         net_inject(n5c, N5C_P, -ip);
-        net_commit(n5c, dc);
         a->n5r.e[a->src_cout].src = n5c->x[N5C_OUT];
     }
 
@@ -707,6 +709,18 @@ static double tick(Amp* a, double vin, int dc)
         ik = a->v5a.ip + a->v5a.ig;
         net_inject(n5r, N5R_G, -a->v5a.ig);
         net_commit(n5r, dc);
+        /* The tone stacks move on with the current the relay network drew from them, so each
+         * stack and n5r agree on the voltage at the stack's output. */
+        if (hg) {
+            const NetElem* e = &n5r->e[a->src_hout];
+            net_inject(&a->n5h, N5H_OUT, -(e->src - n5r->x[N5R_REL]) / e->val);
+            net_commit(&a->n5h, dc);
+        }
+        if (cl) {
+            const NetElem* e = &n5r->e[a->src_cout];
+            net_inject(&a->n5c, N5C_OUT, -(e->src - n5r->x[N5R_REL]) / e->val);
+            net_commit(&a->n5c, dc);
+        }
         a->vj = n6->xh[N6_J] + INV(n6, N6_J, N6_K) * ik;
         /* V5b: grid in n6 (loop return), plate in n7 (master, to the phase inverter) */
         n7->e[a->src_r112].src = a->pi_vx;
@@ -751,6 +765,10 @@ static double tick(Amp* a, double vin, int dc)
         c.n8 = n8;
         c.n9 = n9;
         c.a = a;
+        c.gA = a->el_ga; /* starting points for the grid solves: the last sample's */
+        c.gB = a->el_gb;
+        c.vga = a->pi_vg;
+        c.vk = a->pi_vk;
         x[0] = a->pia;
         x[1] = a->pib;
         x[2] = a->vhalf;
@@ -799,6 +817,8 @@ static double tick(Amp* a, double vin, int dc)
         a->ib_side = c.i_b;
         a->pi_vk = c.vk;
         a->pi_vg = c.vga;
+        a->el_ga = c.gA;
+        a->el_gb = c.gB;
         a->pi_ig = c.ig_pi;
         net_inject(&a->n7, N7_P, -a->ip5b);
         net_inject(&a->n7, N7_G, -a->pi_ig);
@@ -827,17 +847,34 @@ static double tick(Amp* a, double vin, int dc)
             a->bplus += a->T / RES_C * ((a->v0 - a->bplus) / RES_R - c.i_a - c.i_b - ichoke);
             a->vscr += a->T / C_SCR * (ichoke - 2.0 * (c.ig2a + c.ig2b) - PRE_I);
         }
-        a->vg2a += 0.5 * (a->vscr - R_G2 * c.ig2a - a->vg2a);
-        a->vg2b += 0.5 * (a->vscr - R_G2 * c.ig2b - a->vg2b);
+        a->vg2a += a->g2_coef * (a->vscr - R_G2 * c.ig2a - a->vg2a);
+        a->vg2b += a->g2_coef * (a->vscr - R_G2 * c.ig2b - a->vg2b);
         a->out = n9->x[N9_S];
     }
     return a->out;
 }
 
+void amp_set_rate(Amp* a, double fs)
+{
+    Stage* st[6] = { &a->v1a, &a->v1b, &a->v2b, &a->v3a, &a->v4b, &a->v5b };
+    int i;
+    a->T = 1.0 / fs;
+    /* The screen voltages lag their currents by SCREEN_TAU, which keeps their iteration stable;
+     * it halves the gap each sample at 192 kHz, whatever the rate. */
+    a->g2_coef = 1.0 - exp(-a->T / SCREEN_TAU);
+    a->power_coef = 1.0 - exp(-a->T / POWER_TAU);
+    for (i = 0; i < 6; ++i)
+        st[i]->gc = st[i]->ck > 0.0 ? 2.0 * st[i]->ck / a->T : 0.0;
+    for (i = 0; i < NNETS; ++i) {
+        Net* n = net_at(a, i);
+        n->T = a->T;
+        n->dirty = 1;
+    }
+}
+
 int amp_init(Amp* a, double fs)
 {
     memset(a, 0, sizeof *a);
-    a->T = 1.0 / fs;
     if (!lut_build(&a->tri, &TUBE_12AX7, -40.0, 6.0, 737, 0.0, 520.0, 261)
 ) {
         amp_free(a);
@@ -846,19 +883,20 @@ int amp_init(Amp* a, double fs)
     grid_lut_build(&a->gtri, &TUBE_12AX7);
     grid_lut_build(&a->gpen, &TUBE_EL34);
     pent_build(&a->pen, &TUBE_EL34);
-    stage_setup(&a->v1a, &a->tri, 0.0, R6, C3, a->T);
-    stage_setup(&a->v1b, &a->tri, 0.0, R10, K3, a->T);
-    stage_setup(&a->v2b, &a->tri, R16, R17, K12, a->T);
-    stage_setup(&a->v3a, &a->tri, 0.0, RX1, 0.0, a->T);
-    stage_setup(&a->v4b, &a->tri, 0.0, R26A, K16, a->T);
-    stage_setup(&a->v5b, &a->tri, 0.0, R110, 0.0, a->T);
+    stage_setup(&a->v1a, &a->tri, 0.0, R6, C3, 1.0 / fs);
+    stage_setup(&a->v1b, &a->tri, 0.0, R10, K3, 1.0 / fs);
+    stage_setup(&a->v2b, &a->tri, R16, R17, K12, 1.0 / fs);
+    stage_setup(&a->v3a, &a->tri, 0.0, RX1, 0.0, 1.0 / fs);
+    stage_setup(&a->v4b, &a->tri, 0.0, R26A, K16, 1.0 / fs);
+    stage_setup(&a->v5b, &a->tri, 0.0, R110, 0.0, 1.0 / fs);
     a->v3b.lut = &a->tri;
     a->v3b.rp = 0.0;
     a->v5a.lut = &a->tri;
     a->v5a.rp = RX3;
-    a->rp1a = a->rp4b = 62.5e3;
+    a->rp1a = 62.5e3;
     a->run_hg = a->run_cl = 1;
     build_nets(a);
+    amp_set_rate(a, fs);
     return 1;
 }
 
@@ -951,7 +989,6 @@ void amp_reset(Amp* a, const AmpPots* p)
     a->n5r.e[a->src_r103].src = a->vj;
     tick(a, 0.0, 1);
     a->rp1a = plate_r(&a->v1a, a->n1.x[N1_P]);
-    a->rp4b = plate_r(&a->v4b, a->n5c.x[N5C_P]);
 
     /* Running state from the operating point, then a short settle. */
     amp_set_pots(a, p);
@@ -963,6 +1000,6 @@ void amp_reset(Amp* a, const AmpPots* p)
 double amp_tick(Amp* a, double vin)
 {
     const double y = tick(a, vin, 0);
-    a->power += 0.0005 * (y * y / Z_SPK - a->power);
+    a->power += a->power_coef * (y * y / Z_SPK - a->power);
     return y;
 }
