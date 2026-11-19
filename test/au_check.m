@@ -182,7 +182,7 @@ int main(int argc, char** argv)
         AudioUnitParameterID ids[64];
         AudioUnitGetPropertyInfo(au, kAudioUnitProperty_ParameterList, kAudioUnitScope_Global, 0, &size, NULL);
         n = size / sizeof(AudioUnitParameterID);
-        check("18 parameters: 17 controls and the power lamp (the host has bypass)", n == 18);
+        check("19 parameters: 18 controls and the power lamp (the host has bypass)", n == 19);
         size = sizeof ids;
         AudioUnitGetProperty(au, kAudioUnitProperty_ParameterList, kAudioUnitScope_Global, 0, ids, &size);
         size = sizeof info;
