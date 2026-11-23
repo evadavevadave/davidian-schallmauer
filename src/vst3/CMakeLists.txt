@@ -5,7 +5,8 @@ cmake_minimum_required(VERSION 3.25)
 enable_language(CXX)
 
 set(SMTG_ENABLE_VST3_PLUGIN_EXAMPLES OFF CACHE BOOL "" FORCE)
-set(SMTG_ENABLE_VST3_HOSTING_EXAMPLES ON CACHE BOOL "" FORCE) # builds the validator
+# The validator builds without the sample hosts, which on Linux would need gtkmm.
+set(SMTG_ENABLE_VST3_HOSTING_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(SMTG_ENABLE_VSTGUI_SUPPORT OFF CACHE BOOL "" FORCE)
 set(SMTG_CREATE_PLUGIN_LINK OFF CACHE BOOL "" FORCE)  # no links into the system VST3 folder
 set(SMTG_USE_STATIC_CRT ON CACHE BOOL "" FORCE)       # no runtime redistributable needed
@@ -36,6 +37,13 @@ if(WIN32)
 elseif(APPLE)
     set_source_files_properties(../ui/view.c PROPERTIES LANGUAGE OBJC)
     target_link_libraries(schallmauer_vst3 PRIVATE "-framework Cocoa")
+else()
+    find_package(X11 REQUIRED)
+    target_include_directories(schallmauer_vst3 PRIVATE ${X11_INCLUDE_DIR})
+    target_link_libraries(schallmauer_vst3 PRIVATE ${X11_LIBRARIES})
+    # The C++ runtime goes inside the plugin, so it loads on distributions with an older one,
+    # and no undefined symbol is left for a host to trip over at load time.
+    target_link_options(schallmauer_vst3 PRIVATE -static-libstdc++ -static-libgcc -Wl,--no-undefined)
 endif()
 
 # The library sits in Contents/<arch>; the documents go in Contents/Resources. (The SDK's own
@@ -49,13 +57,25 @@ add_custom_command(TARGET schallmauer_vst3 POST_BUILD
         "$<TARGET_FILE_DIR:schallmauer_vst3>/../../desktop.ini"
     VERBATIM)
 
-# A small Windows host that checks the editor and compares the sound with the LV2 build.
-if(WIN32)
+# A small host that checks the editor and compares the sound with the LV2 build. On Linux the
+# editor checks need an X display (CI runs them under Xvfb) and are skipped without one.
+if(WIN32 OR (UNIX AND NOT APPLE))
+    if(WIN32)
+        set(SH_MODULE_HOST module_win32.cpp)
+    else()
+        set(SH_MODULE_HOST module_linux.cpp)
+    endif()
     add_executable(vst3_check ../../test/vst3_check.cpp
-        ${vst3sdk_SOURCE_DIR}/public.sdk/source/vst/hosting/module_win32.cpp
+        ${vst3sdk_SOURCE_DIR}/public.sdk/source/vst/hosting/${SH_MODULE_HOST}
         ${vst3sdk_SOURCE_DIR}/public.sdk/source/vst/hosting/plugprovider.cpp)
     target_compile_features(vst3_check PRIVATE cxx_std_17)
-    target_link_libraries(vst3_check PRIVATE sdk_hosting user32)
+    target_link_libraries(vst3_check PRIVATE sdk_hosting)
+    if(WIN32)
+        target_link_libraries(vst3_check PRIVATE user32)
+    else()
+        target_include_directories(vst3_check PRIVATE ${X11_INCLUDE_DIR})
+        target_link_libraries(vst3_check PRIVATE ${X11_LIBRARIES} ${CMAKE_DL_LIBS})
+    endif()
     add_dependencies(vst3_check schallmauer_vst3 schallmauer)
     add_test(NAME vst3_check
         COMMAND vst3_check "${CMAKE_BINARY_DIR}/VST3/$<CONFIG>/Davidian Schallmauer.vst3" "${BUNDLE_DIR}")

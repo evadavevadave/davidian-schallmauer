@@ -52,7 +52,8 @@ MIT and Apache 2.0 are both compatible with GPL version 3, so the VST3 plugin an
 | Component | Licence | How it is used |
 |---|---|---|
 | Microsoft C and C++ runtimes | Microsoft Visual Studio licence | Linked statically into the Windows DLLs and the VST3 plugin (`/MT`). They are system libraries under GPL-3.0 section 1. |
-| Xlib (libX11) | MIT/X11 | Linked dynamically by the Linux GUI. |
+| Xlib (libX11) | MIT/X11 | Linked dynamically by the Linux GUI and the Linux VST3. |
+| GCC runtime (libstdc++, libgcc) | GPL-3.0 with the GCC Runtime Library Exception | Linked statically into the Linux VST3, so it loads on distributions with an older C++ runtime. The exception allows this in a program under any licence. |
 | Cocoa, Core Graphics, AudioToolbox, AudioUnit, CoreAudio, libc++ | Apple system frameworks | Linked dynamically by the macOS GUI and the Audio Unit. |
 | GitHub Actions (actions/checkout, upload-artifact, download-artifact) | MIT | Used to build the release bundles. Not shipped. |
 | lilv, from the Ardour 9 install | ISC | Loaded at run time by `test/lilv_check.c` only. Not shipped in the bundle. |

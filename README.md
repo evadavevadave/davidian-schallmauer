@@ -11,7 +11,7 @@ Stereo in and out with no latency: the amplifier is mono, so the two inputs are 
 | Format | Windows | macOS | Linux |
 |---|---|---|---|
 | LV2 | yes | yes | yes |
-| VST3 | yes | | |
+| VST3 | yes | | yes |
 | Audio Unit (AUv2) | | yes | |
 
 ## Download
@@ -22,14 +22,15 @@ Ready-made builds are on the [Releases page](https://github.com/evadavevadave/da
 |---|---|---|
 | `…-windows-x64.zip` | LV2, VST3 | Windows 10/11, 64-bit hosts |
 | `…-macos-universal.zip` | LV2, Audio Unit | macOS 10.13 or later, Apple silicon and Intel |
-| `…-linux-x64.zip` | LV2 | 64-bit Intel/AMD Linux (glibc 2.29 or later, e.g. Ubuntu 20.04 or Debian 11; X11 or XWayland for the GUI) |
-| `…-linux-arm64.zip` | LV2 | 64-bit ARM Linux, e.g. Raspberry Pi 4/5 with a 64-bit OS |
+| `…-linux-x64.zip` | LV2, VST3 | 64-bit Intel/AMD Linux (glibc GLIBCVER or later, e.g. DISTROS; X11 or XWayland for the GUI) |
+| `…-linux-arm64.zip` | LV2, VST3 | 64-bit ARM Linux, e.g. Raspberry Pi 4/5 with a 64-bit OS |
 
 Unzip, copy the plugin folder for your host's format into its plugin folder, and restart your host (or rescan plugins):
 
 | Format | Copy | Into |
 |---|---|---|
 | VST3 (Windows) | `Davidian Schallmauer.vst3` | `C:\Program Files\Common Files\VST3` |
+| VST3 (Linux) | `Davidian Schallmauer.vst3` | `~/.vst3` (or `/usr/lib/vst3` for all users) |
 | Audio Unit (macOS) | `Davidian Schallmauer.component` | `~/Library/Audio/Plug-Ins/Components` (or `/Library/Audio/Plug-Ins/Components` for all users) |
 | LV2 (Windows) | `schallmauer.lv2` | `%APPDATA%\LV2` (create it if it doesn't exist) |
 | LV2 (macOS) | `schallmauer.lv2` | `~/Library/Audio/Plug-Ins/LV2` |
@@ -169,7 +170,7 @@ build.bat
 
 ### Every platform (CMake)
 
-Needs CMake 3.25 or later and a C/C++ compiler. On macOS, the Xcode command-line tools; add `-DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"` for a universal build. On Linux, gcc or clang plus the X11 headers (`libx11-dev` on Debian/Ubuntu) for the GUI; without them CMake builds the plugin alone.
+Needs CMake 3.25 or later and a C/C++ compiler. On macOS, the Xcode command-line tools; add `-DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"` for a universal build. On Linux, gcc or clang plus the X11 headers (`libx11-dev` on Debian/Ubuntu) for the GUI and the VST3; without them CMake builds the LV2 plugin alone, with no GUI.
 
 ```bash
 cmake -S . -B build-cmake -DCMAKE_BUILD_TYPE=Release
@@ -179,7 +180,7 @@ cmake -S . -B build-cmake -DCMAKE_BUILD_TYPE=Release
 cmake --build build-cmake --config Release
 ```
 
-The VST3 lands in `build-cmake\VST3\Release` (Windows) and the Audio Unit in `build-cmake/AU` (macOS, signed ad hoc). They are on by default on Windows and macOS respectively; turn them off with `-DSCHALLMAUER_VST3=OFF` or `-DSCHALLMAUER_AU=OFF`, for example to build offline. `-DSCHALLMAUER_VST3=ON` also builds a VST3 on macOS, untested.
+The VST3 lands in `build-cmake/VST3/Release` (Windows and Linux) and the Audio Unit in `build-cmake/AU` (macOS, signed ad hoc). The VST3 is on by default on Windows and Linux, and the Audio Unit on macOS; turn them off with `-DSCHALLMAUER_VST3=OFF` or `-DSCHALLMAUER_AU=OFF`, for example to build offline. `-DSCHALLMAUER_VST3=ON` also builds a VST3 on macOS, untested.
 
 To copy the LV2 bundle into `~/.lv2` (Linux):
 
@@ -217,7 +218,7 @@ ctest --test-dir build-cmake -C Release
 - `ui_check` (Windows) hosts the built GUI and drives it with mouse messages.
 - `lilv_check` (Windows) validates the bundle with the lilv LV2 parser, without installing anything.
 - `params_check` checks the VST3 and Audio Unit parameters against the LV2 ports and the panel.
-- `vst3_check` (Windows) hosts the VST3, clicks and drags on its editor and checks the edits it reports, then compares its sound with the LV2 build. The VST3 build also runs Steinberg's validator.
+- `vst3_check` (Windows and Linux) hosts the VST3, clicks and drags on its editor and checks the edits it reports, then compares its sound with the LV2 build. On Linux the editor checks need an X display (CI uses Xvfb: `xvfb-run -a ctest --test-dir build-cmake`) and are skipped without one. The VST3 build also runs Steinberg's validator.
 - `au_check` (macOS) loads the Audio Unit from its bundle, compares its sound with the LV2 build, and opens its view. CI also runs Apple's `auval` on it.
 
 Both sound comparisons cover parameter changes and the host's bypass, and expect the output to match the LV2 build exactly.

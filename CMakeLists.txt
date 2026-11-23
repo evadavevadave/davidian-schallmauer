@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Builds the LV2 bundle on any platform, plus the VST3 plugin (Windows) and the Audio Unit
+# Builds the LV2 bundle on any platform, plus the VST3 plugin (Windows and Linux) and the Audio Unit
 # (macOS). On Windows, build.bat builds the LV2 bundle without CMake.
 cmake_minimum_required(VERSION 3.16)
 project(schallmauer VERSION 1.0.0 LANGUAGES C)
@@ -10,7 +10,12 @@ endif()
 
 # The extra formats download their SDKs while configuring (both permissively licensed; see
 # NOTICE.md). The VST3 SDK needs CMake 3.25 or later.
-option(SCHALLMAUER_VST3 "Build the VST3 plugin (fetches the Steinberg VST3 SDK)" ${WIN32})
+if(WIN32 OR (UNIX AND NOT APPLE))
+    set(SH_VST3_DEFAULT ON)
+else()
+    set(SH_VST3_DEFAULT OFF)
+endif()
+option(SCHALLMAUER_VST3 "Build the VST3 plugin (fetches the Steinberg VST3 SDK)" ${SH_VST3_DEFAULT})
 option(SCHALLMAUER_AU "Build the Audio Unit (macOS; fetches the Apple AudioUnitSDK)" ${APPLE})
 
 if(WIN32)
@@ -28,6 +33,10 @@ else()
     set(UI_CLASS ui:X11UI)
     find_package(X11)
     set(WITH_UI ${X11_FOUND})
+    if(SCHALLMAUER_VST3 AND NOT X11_FOUND)
+        message(WARNING "No X11 headers (libx11-dev): building without the VST3, whose editor needs them")
+        set(SCHALLMAUER_VST3 OFF)
+    endif()
 endif()
 
 set(BUNDLE_DIR ${CMAKE_BINARY_DIR}/schallmauer.lv2)

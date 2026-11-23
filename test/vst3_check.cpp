@@ -1,19 +1,22 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright (C) 2026 Davidian. See LICENSE and NOTICE.md. */
-/* Hosts the built VST3 the way a Windows DAW does and checks what Steinberg's validator does
- * not: that the editor turns mouse clicks and drags into begin/perform/end edits, and that
+/* Hosts the built VST3 the way a Windows or Linux DAW does and checks what Steinberg's validator
+ * does not: that the editor turns mouse clicks and drags into begin/perform/end edits, and that
  * the VST3 sounds the same as the LV2 build, sample for sample, with the same settings
- * (including a bypass). Windows only.
+ * (including a bypass). On Linux the editor checks need an X display and are skipped without one.
  * Usage: vst3_check <Davidian Schallmauer.vst3 folder> <schallmauer.lv2 folder> */
 #ifndef _CRT_SECURE_NO_WARNINGS
 #    define _CRT_SECURE_NO_WARNINGS
 #endif
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <string>
 #include <vector>
-#include <windows.h>
+#if defined(_WIN32)
+#    include <windows.h>
+#endif
 
 #include "pluginterfaces/gui/iplugview.h"
 #include "pluginterfaces/vst/ivstaudioprocessor.h"
@@ -25,6 +28,13 @@
 #include "public.sdk/source/vst/hosting/processdata.h"
 
 #include "compare.h"
+
+/* After the SDK headers, whose names the X11 macros (None, Bool, Status) would clash with. */
+#if !defined(_WIN32)
+#    include <X11/Xlib.h>
+#    include <X11/Xutil.h>
+#    include <unistd.h>
+#endif
 
 using namespace Steinberg;
 using namespace Steinberg::Vst;
@@ -73,55 +83,246 @@ static bool one_edit(const std::vector<Handler::Edit>& log, ParamID id, ParamVal
     return true;
 }
 
+/* ---- Editor: a host window, the editor inside it, and mouse input sent to the panel ---- */
+
+#if defined(_WIN32)
+
 static LRESULT CALLBACK frame_proc(HWND h, UINT m, WPARAM w, LPARAM l) { return DefWindowProcA(h, m, w, l); }
+
+struct Host {
+    HWND frame = nullptr;
+    HWND panel = nullptr;
+    const char* type = kPlatformTypeHWND;
+    bool open()
+    {
+        WNDCLASSA wc = {};
+        wc.lpfnWndProc = frame_proc;
+        wc.hInstance = GetModuleHandleA(nullptr);
+        wc.lpszClassName = "SchallmauerTestFrame";
+        RegisterClassA(&wc);
+        frame = CreateWindowA("SchallmauerTestFrame", "host", WS_OVERLAPPEDWINDOW, 0, 0, 1000, 520, nullptr,
+                              nullptr, wc.hInstance, nullptr);
+        return frame != nullptr;
+    }
+    void* parent() { return frame; }
+    void before_attach(IPlugView*) {}
+    bool find_panel()
+    {
+        panel = FindWindowExA(frame, nullptr, "DavidianSchallmauerVST3", nullptr);
+        return panel != nullptr;
+    }
+    void down(int x, int y) { SendMessageA(panel, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(x, y)); }
+    void move(int x, int y) { SendMessageA(panel, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(x, y)); }
+    void up(int x, int y) { SendMessageA(panel, WM_LBUTTONUP, 0, MAKELPARAM(x, y)); }
+    void check_attached() {}
+    bool panel_gone() { return !panel || !IsWindow(panel); }
+    void check_detached() {}
+    void close() { DestroyWindow(frame); }
+};
+
+#else
+
+/* The host's frame and run loop, as a Linux DAW provides them. The test calls the handlers the
+ * editor registers instead of running a real loop. */
+struct Frame : IPlugFrame, Linux::IRunLoop {
+    Linux::IEventHandler* events = nullptr;
+    Linux::ITimerHandler* timer = nullptr;
+    int fd = -1;
+    Linux::TimerInterval interval = 0;
+    tresult PLUGIN_API queryInterface(const TUID iid, void** obj) override
+    {
+        if (FUnknownPrivate::iidEqual(iid, IPlugFrame::iid) || FUnknownPrivate::iidEqual(iid, FUnknown::iid))
+            *obj = static_cast<IPlugFrame*>(this);
+        else if (FUnknownPrivate::iidEqual(iid, Linux::IRunLoop::iid))
+            *obj = static_cast<Linux::IRunLoop*>(this);
+        else {
+            *obj = nullptr;
+            return kNoInterface;
+        }
+        return kResultOk;
+    }
+    uint32 PLUGIN_API addRef() override { return 1; }
+    uint32 PLUGIN_API release() override { return 1; }
+    tresult PLUGIN_API resizeView(IPlugView*, ViewRect*) override { return kResultFalse; }
+    tresult PLUGIN_API registerEventHandler(Linux::IEventHandler* h, Linux::FileDescriptor f) override
+    {
+        events = h;
+        fd = f;
+        return kResultOk;
+    }
+    tresult PLUGIN_API unregisterEventHandler(Linux::IEventHandler* h) override
+    {
+        if (h == events)
+            events = nullptr;
+        return kResultOk;
+    }
+    tresult PLUGIN_API registerTimer(Linux::ITimerHandler* h, Linux::TimerInterval ms) override
+    {
+        timer = h;
+        interval = ms;
+        return kResultOk;
+    }
+    tresult PLUGIN_API unregisterTimer(Linux::ITimerHandler* h) override
+    {
+        if (h == timer)
+            timer = nullptr;
+        return kResultOk;
+    }
+};
+
+struct Host {
+    Display* dpy = nullptr;
+    Window frame = 0;
+    Window panel = 0;
+    Frame host_frame;
+    Time time = 1000;
+    const char* type = kPlatformTypeX11EmbedWindowID;
+    bool open()
+    {
+        dpy = XOpenDisplay(nullptr);
+        if (!dpy)
+            return false;
+        frame = XCreateSimpleWindow(dpy, DefaultRootWindow(dpy), 0, 0, 1000, 520, 0, 0, 0);
+        XMapWindow(dpy, frame);
+        XSync(dpy, False);
+        return true;
+    }
+    void* parent() { return (void*)(uintptr_t)frame; }
+    void before_attach(IPlugView* view) { view->setFrame(&host_frame); }
+    std::vector<Window> children()
+    {
+        Window root, par, *kids = nullptr;
+        unsigned n = 0;
+        std::vector<Window> out;
+        XSync(dpy, False);
+        if (XQueryTree(dpy, frame, &root, &par, &kids, &n)) {
+            out.assign(kids, kids + n);
+            if (kids)
+                XFree(kids);
+        }
+        return out;
+    }
+    bool find_panel()
+    {
+        const std::vector<Window> kids = children();
+        panel = kids.size() == 1 ? kids[0] : 0;
+        return panel != 0;
+    }
+    /* The panel reads its events on its own connection when the run loop calls it. */
+    void pump()
+    {
+        XSync(dpy, False);
+        for (int i = 0; i < 4; ++i) {
+            if (host_frame.events)
+                host_frame.events->onFDIsSet(host_frame.fd);
+            usleep(2000);
+        }
+        if (host_frame.timer)
+            host_frame.timer->onTimer();
+    }
+    void button(int type, int x, int y)
+    {
+        XEvent e = {};
+        e.xbutton.type = type;
+        e.xbutton.display = dpy;
+        e.xbutton.window = panel;
+        e.xbutton.root = DefaultRootWindow(dpy);
+        e.xbutton.time = time;
+        e.xbutton.x = e.xbutton.x_root = x;
+        e.xbutton.y = e.xbutton.y_root = y;
+        e.xbutton.button = Button1;
+        e.xbutton.state = type == ButtonRelease ? Button1Mask : 0;
+        e.xbutton.same_screen = True;
+        XSendEvent(dpy, panel, False, type == ButtonPress ? ButtonPressMask : ButtonReleaseMask, &e);
+        pump();
+    }
+    void down(int x, int y)
+    {
+        time += 1000; /* far apart, so no two clicks make a double click */
+        button(ButtonPress, x, y);
+    }
+    void move(int x, int y)
+    {
+        XEvent e = {};
+        e.xmotion.type = MotionNotify;
+        e.xmotion.display = dpy;
+        e.xmotion.window = panel;
+        e.xmotion.root = DefaultRootWindow(dpy);
+        e.xmotion.time = ++time;
+        e.xmotion.x = e.xmotion.x_root = x;
+        e.xmotion.y = e.xmotion.y_root = y;
+        e.xmotion.state = Button1Mask;
+        e.xmotion.same_screen = True;
+        XSendEvent(dpy, panel, False, PointerMotionMask, &e);
+        pump();
+    }
+    void up(int x, int y) { button(ButtonRelease, x, y); }
+    void check_attached()
+    {
+        check("editor registers its display connection with the host's run loop",
+              host_frame.events != nullptr && host_frame.fd >= 0);
+        check("editor registers a redraw timer",
+              host_frame.timer != nullptr && host_frame.interval > 0 && host_frame.interval <= 50);
+    }
+    bool panel_gone() { return children().empty(); }
+    void check_detached() { check("editor unregisters from the run loop", !host_frame.events && !host_frame.timer); }
+    void close()
+    {
+        XDestroyWindow(dpy, frame);
+        XCloseDisplay(dpy);
+    }
+};
+
+#endif
 
 static void test_editor(IEditController* ctrl, Handler& handler)
 {
-    WNDCLASSA wc = {};
-    wc.lpfnWndProc = frame_proc;
-    wc.hInstance = GetModuleHandleA(nullptr);
-    wc.lpszClassName = "SchallmauerTestFrame";
-    RegisterClassA(&wc);
-    HWND frame = CreateWindowA("SchallmauerTestFrame", "host", WS_OVERLAPPEDWINDOW, 0, 0, 1000, 520, nullptr,
-                               nullptr, wc.hInstance, nullptr);
+    Host host;
     IPlugView* view = ctrl->createView(ViewType::kEditor);
     check("controller creates an editor", view != nullptr);
     if (!view)
         return;
     ViewRect r;
     check("editor is 960 x 470", view->getSize(&r) == kResultOk && r.getWidth() == 960 && r.getHeight() == 470);
-    check("editor supports HWND", view->isPlatformTypeSupported(kPlatformTypeHWND) == kResultTrue);
-    check("editor attaches to a host window", view->attached(frame, kPlatformTypeHWND) == kResultOk);
-    HWND panel = FindWindowExA(frame, nullptr, "DavidianSchallmauerVST3", nullptr);
-    check("editor window is a child of the host window", panel != nullptr);
-    if (panel) {
+    check("editor supports the platform's window type", view->isPlatformTypeSupported(host.type) == kResultTrue);
+    if (!host.open()) {
+        std::printf("  (no display, so the editor window checks are skipped)\n");
+        view->release();
+        return;
+    }
+    host.before_attach(view);
+    check("editor attaches to a host window", view->attached(host.parent(), host.type) == kResultOk);
+    host.check_attached();
+    const bool found = host.find_panel();
+    check("editor window is a child of the host window", found);
+    if (found) {
         ParamValue v = -1;
         /* Channel footswitch at (131, 396): one click selects the clean channel. */
         handler.log.clear();
-        SendMessageA(panel, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(131, 396));
-        SendMessageA(panel, WM_LBUTTONUP, 0, MAKELPARAM(131, 396));
+        host.down(131, 396);
+        host.up(131, 396);
         check("footswitch click is one begin/perform/end edit", one_edit(handler.log, PORT_CHANNEL, &v) && v == 0.0);
         check("controller follows the click", ctrl->getParamNormalized(PORT_CHANNEL) == 0.0);
 
         /* High gain Gain knob at (529, 186): dragging up 36 px adds 0.2, from 0.6 to 0.8. */
         handler.log.clear();
-        SendMessageA(panel, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(529, 186));
-        SendMessageA(panel, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(529, 168));
-        SendMessageA(panel, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(529, 150));
-        SendMessageA(panel, WM_LBUTTONUP, 0, MAKELPARAM(529, 150));
+        host.down(529, 186);
+        host.move(529, 168);
+        host.move(529, 150);
+        host.up(529, 150);
         check("knob drag is one edit with several performs", one_edit(handler.log, PORT_HG_GAIN, &v)
                                                                 && handler.log.size() >= 4);
         check("knob drag ends 0.2 higher", std::fabs(v - 0.8) < 1e-4);
 
         /* Cabinet switch at (640, 400): the top position is Off. */
         handler.log.clear();
-        SendMessageA(panel, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(640, 382));
-        SendMessageA(panel, WM_LBUTTONUP, 0, MAKELPARAM(640, 382));
+        host.down(640, 382);
+        host.up(640, 382);
         check("switch click selects Off", one_edit(handler.log, PORT_CAB, &v) && v == 0.0);
 
         handler.log.clear();
-        SendMessageA(panel, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(5, 5));
-        SendMessageA(panel, WM_LBUTTONUP, 0, MAKELPARAM(5, 5));
+        host.down(5, 5);
+        host.up(5, 5);
         check("clicking empty panel sends nothing", handler.log.empty());
 
         /* Values from the host (automation, the power lamp) reach the open editor without trouble. */
@@ -129,9 +330,10 @@ static void test_editor(IEditController* ctrl, Handler& handler)
                                                   && ctrl->setParamNormalized(PORT_POWER, 0.7) == kResultOk);
     }
     check("editor detaches", view->removed() == kResultOk);
-    check("editor window is gone", !panel || !IsWindow(panel));
+    check("editor window is gone", host.panel_gone());
+    host.check_detached();
     view->release();
-    DestroyWindow(frame);
+    host.close();
 }
 
 /* ---- Sound: the VST3 against the LV2 build (see compare.h) ---- */

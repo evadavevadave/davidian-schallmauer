@@ -32,8 +32,11 @@ ShView* sh_view_open(void* parent, const ShViewHost* host);
 void* sh_view_widget(ShView* v);
 /* A value from the host; it shows on the next redraw. */
 void sh_view_set(ShView* v, int port, float value);
-/* X11 has no event loop of its own here, so the host's idle call pumps it. Returns 0. */
+/* X11 has no event loop of its own here, so the host's idle call or timer pumps it. Returns 0. */
 int sh_view_idle(ShView* v);
+/* X11: the display connection's file descriptor, readable when events wait for sh_view_idle.
+ * -1 on Windows and macOS, which deliver events themselves. */
+int sh_view_fd(ShView* v);
 void sh_view_close(ShView* v);
 
 #ifdef __cplusplus

@@ -336,8 +336,7 @@ public:
 #elif defined(__APPLE__)
         return std::strcmp(type, kPlatformTypeNSView) == 0 ? kResultTrue : kResultFalse;
 #else
-        (void)type;
-        return kResultFalse; /* X11 embedding would need the host's run loop */
+        return std::strcmp(type, kPlatformTypeX11EmbedWindowID) == 0 ? kResultTrue : kResultFalse;
 #endif
     }
 
@@ -352,6 +351,22 @@ public:
         view = sh_view_open(parent, &host);
         if (!view)
             return kResultFalse;
+#if SMTG_OS_LINUX
+        /* X11 has no global event loop: the host's run loop wakes the panel when its display
+         * connection has events, and a timer redraws it about 30 times a second. */
+        /* The host offers it on the plug frame, or (some older hosts) on its host context. */
+        if (plugFrame)
+            plugFrame->queryInterface(Linux::IRunLoop::iid, (void**)&run_loop);
+        if (!run_loop && controller->getHostContext())
+            controller->getHostContext()->queryInterface(Linux::IRunLoop::iid, (void**)&run_loop);
+        if (!run_loop) {
+            close();
+            return kResultFalse;
+        }
+        pump.editor = this;
+        run_loop->registerEventHandler(&pump, sh_view_fd(view));
+        run_loop->registerTimer(&pump, 33);
+#endif
         for (int i = 0; i < SH_NUM_PARAMS; ++i)
             if (SH_PARAMS[i].port != PORT_ENABLED)
                 sh_view_set(view, SH_PARAMS[i].port, controller->plain(SH_PARAMS[i].port));
@@ -378,9 +393,48 @@ private:
     {
         if (controller->editor == this)
             controller->editor = nullptr;
+#if SMTG_OS_LINUX
+        if (run_loop) {
+            run_loop->unregisterEventHandler(&pump);
+            run_loop->unregisterTimer(&pump);
+            run_loop->release();
+            run_loop = nullptr;
+        }
+#endif
         sh_view_close(view);
         view = nullptr;
     }
+
+#if SMTG_OS_LINUX
+    /* The run loop's callbacks. It lives inside the editor, which unregisters it before going. */
+    struct Pump : Linux::IEventHandler, Linux::ITimerHandler {
+        Editor* editor = nullptr;
+        tresult PLUGIN_API queryInterface(const TUID iid, void** obj) override
+        {
+            if (FUnknownPrivate::iidEqual(iid, Linux::IEventHandler::iid)
+                || FUnknownPrivate::iidEqual(iid, FUnknown::iid))
+                *obj = static_cast<Linux::IEventHandler*>(this);
+            else if (FUnknownPrivate::iidEqual(iid, Linux::ITimerHandler::iid))
+                *obj = static_cast<Linux::ITimerHandler*>(this);
+            else {
+                *obj = nullptr;
+                return kNoInterface;
+            }
+            return kResultOk;
+        }
+        uint32 PLUGIN_API addRef() override { return 1; }
+        uint32 PLUGIN_API release() override { return 1; }
+        void PLUGIN_API onFDIsSet(Linux::FileDescriptor) override { idle(); }
+        void PLUGIN_API onTimer() override { idle(); }
+        void idle()
+        {
+            if (editor && editor->view)
+                sh_view_idle(editor->view);
+        }
+    };
+    Pump pump;
+    Linux::IRunLoop* run_loop = nullptr;
+#endif
 
     static void on_write(void* host, int port, float value)
     {

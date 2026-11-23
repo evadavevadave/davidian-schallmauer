@@ -190,6 +190,7 @@ static void view_redraw(ShView* v)
 
 /* The window's own timer drives redraws. */
 int sh_view_idle(ShView* v) { view_redraw(v); return 0; }
+int sh_view_fd(ShView* v) { (void)v; return -1; }
 
 /* ---- X11 ---- */
 #elif defined(__unix__) && !defined(__APPLE__)
@@ -258,6 +259,7 @@ static void window_close(ShView* v)
 }
 
 void* sh_view_widget(ShView* v) { return (void*)(uintptr_t)v->win; }
+int sh_view_fd(ShView* v) { return v->dpy ? ConnectionNumber(v->dpy) : -1; }
 
 static void blit(ShView* v)
 {
@@ -471,6 +473,7 @@ static void view_redraw(ShView* v)
 
 /* The view's own timer drives redraws. */
 int sh_view_idle(ShView* v) { view_redraw(v); return 0; }
+int sh_view_fd(ShView* v) { (void)v; return -1; }
 
 #else
 #    error "No window layer for this platform (Windows, macOS and X11 are supported)."
