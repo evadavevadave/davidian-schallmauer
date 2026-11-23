@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -286,6 +287,8 @@ static void test_editor(IEditController* ctrl, Handler& handler)
     check("editor is 960 x 470", view->getSize(&r) == kResultOk && r.getWidth() == 960 && r.getHeight() == 470);
     check("editor supports the platform's window type", view->isPlatformTypeSupported(host.type) == kResultTrue);
     if (!host.open()) {
+        /* CI sets SH_REQUIRE_DISPLAY, so a missing virtual display fails instead of skipping. */
+        check("an X display is open, or none is required", !std::getenv("SH_REQUIRE_DISPLAY"));
         std::printf("  (no display, so the editor window checks are skipped)\n");
         view->release();
         return;

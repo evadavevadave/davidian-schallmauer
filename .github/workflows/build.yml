@@ -52,7 +52,7 @@ jobs:
         # On Linux the VST3 editor test opens windows on a virtual X display.
         run: |
           if [ "$RUNNER_OS" = Linux ]; then
-            xvfb-run -a ctest --test-dir build-cmake -C Release --output-on-failure
+            SH_REQUIRE_DISPLAY=1 xvfb-run -a ctest --test-dir build-cmake -C Release --output-on-failure
           else
             ctest --test-dir build-cmake -C Release --output-on-failure
           fi

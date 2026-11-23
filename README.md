@@ -22,7 +22,7 @@ Ready-made builds are on the [Releases page](https://github.com/evadavevadave/da
 |---|---|---|
 | `…-windows-x64.zip` | LV2, VST3 | Windows 10/11, 64-bit hosts |
 | `…-macos-universal.zip` | LV2, Audio Unit | macOS 10.13 or later, Apple silicon and Intel |
-| `…-linux-x64.zip` | LV2, VST3 | 64-bit Intel/AMD Linux (glibc GLIBCVER or later, e.g. DISTROS; X11 or XWayland for the GUI) |
+| `…-linux-x64.zip` | LV2, VST3 | 64-bit Intel/AMD Linux (the LV2 needs glibc 2.29 or later, e.g. Ubuntu 20.04 or Debian 11; the VST3 needs glibc 2.34 or later, e.g. Ubuntu 22.04, Debian 12 or Fedora 35; X11 or XWayland for the GUI) |
 | `…-linux-arm64.zip` | LV2, VST3 | 64-bit ARM Linux, e.g. Raspberry Pi 4/5 with a 64-bit OS |
 
 Unzip, copy the plugin folder for your host's format into its plugin folder, and restart your host (or rescan plugins):
